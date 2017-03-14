@@ -93,17 +93,21 @@ func (p *Procstat) createProcesses() error {
 		errstring += err.Error() + " "
 	}
 
+	procs := make(map[int32]*process.Process)
 	for _, pid := range pids {
-		_, ok := p.pidmap[pid]
-		if !ok {
+		proc, ok := p.pidmap[pid]
+		if ok {
+			procs[pid] = proc
+		} else {
 			proc, err := process.NewProcess(pid)
 			if err == nil {
-				p.pidmap[pid] = proc
+				procs[pid] = proc
 			} else {
 				errstring += err.Error() + " "
 			}
 		}
 	}
+	p.pidmap = procs
 
 	if errstring != "" {
 		outerr = fmt.Errorf("%s", errstring)
