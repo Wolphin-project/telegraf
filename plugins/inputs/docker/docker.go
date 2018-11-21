@@ -34,6 +34,7 @@ type Docker struct {
 	Timeout        internal.Duration
 	PerDevice      bool     `toml:"perdevice"`
 	Total          bool     `toml:"total"`
+	PerCPU		   bool     `toml:"percpu"`
 	TagEnvironment []string `toml:"tag_env"`
 	LabelInclude   []string `toml:"docker_label_include"`
 	LabelExclude   []string `toml:"docker_label_exclude"`
@@ -43,6 +44,7 @@ type Docker struct {
 
 	ContainerStateInclude []string `toml:"container_state_include"`
 	ContainerStateExclude []string `toml:"container_state_exclude"`
+
 
 	tlsint.ClientConfig
 
@@ -443,8 +445,12 @@ func (d *Docker) gatherContainer(
 		}
 		acc.AddFields("docker_container_health", healthfields, tags, time.Now())
 	}
+	per := []bool{
+		d.PerDevice,
+		d.PerCPU,
+	}
 
-	gatherContainerStats(v, acc, tags, container.ID, d.PerDevice, d.Total, daemonOSType)
+	gatherContainerStats(v, acc, tags, container.ID, per, d.Total, daemonOSType)
 
 	return nil
 }
@@ -454,11 +460,13 @@ func gatherContainerStats(
 	acc telegraf.Accumulator,
 	tags map[string]string,
 	id string,
-	perDevice bool,
+	per []bool,
 	total bool,
 	daemonOSType string,
 ) {
 	tm := stat.Read
+
+	perDevice, perCpu := per[0], per[1]
 
 	if tm.Before(time.Unix(0, 0)) {
 		tm = time.Now()
@@ -551,21 +559,36 @@ func gatherContainerStats(
 
 	// If we have OnlineCPUs field, then use it to restrict stats gathering to only Online CPUs
 	// (https://github.com/moby/moby/commit/115f91d7575d6de6c7781a96a082f144fd17e400)
-	var percpuusage []uint64
-	if stat.CPUStats.OnlineCPUs > 0 {
-		percpuusage = stat.CPUStats.CPUUsage.PercpuUsage[:stat.CPUStats.OnlineCPUs]
-	} else {
-		percpuusage = stat.CPUStats.CPUUsage.PercpuUsage
-	}
+	if perCpu {
+		var percpuusage []uint64
+		if stat.CPUStats.OnlineCPUs > 0 {
+			percpuusage = stat.CPUStats.CPUUsage.PercpuUsage[:stat.CPUStats.OnlineCPUs]
+		} else {
+			percpuusage = stat.CPUStats.CPUUsage.PercpuUsage
+		}
 
-	for i, percpu := range percpuusage {
-		percputags := copyTags(tags)
-		percputags["cpu"] = fmt.Sprintf("cpu%d", i)
+		for i, percpu := range percpuusage {
+			percputags := copyTags(tags)
+			percputags["cpu"] = fmt.Sprintf("cpu%d", i)
+			fields := map[string]interface{}{
+				"usage_total":  percpu,
+				"container_id": id,
+			}
+			acc.AddFields("docker_container_cpu", fields, percputags, tm)
+		}
+	} else {
+		var cpuUsage uint64
+
+		for _, usage := range stat.CPUStats.CPUUsage.PercpuUsage {
+			cpuUsage += usage
+		}
+		aggcputags := copyTags(tags)
+		aggcputags["cpu"] = "cpus"
 		fields := map[string]interface{}{
-			"usage_total":  percpu,
+			"usage_total": cpuUsage,
 			"container_id": id,
 		}
-		acc.AddFields("docker_container_cpu", fields, percputags, tm)
+		acc.AddFields("docker_container_cpu", fields, aggcputags, tm)
 	}
 
 	totalNetworkStatMap := make(map[string]interface{})
